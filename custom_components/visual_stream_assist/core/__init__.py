@@ -4,8 +4,10 @@ from typing import Callable
 import time
 import re
 import random
-from mutagen.mp3 import MP3
 import io
+
+from mutagen.mp3 import MP3
+
 from homeassistant.components import assist_pipeline
 from homeassistant.components import media_player
 from homeassistant.components import stt
@@ -20,14 +22,14 @@ from homeassistant.components.assist_pipeline import (
     PipelineRun,
     WakeWordSettings,
 )
-from homeassistant.components.camera import Camera
+from homeassistant.components import camera as camera_component
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, Context
 from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.entity import Entity, DeviceInfo
-from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
 from .stream import Stream
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,43 +54,41 @@ def init_entity(entity: Entity, key: str, config_entry: ConfigEntry) -> str:
     return unique_id
 
 
-async def get_stream_source(hass: HomeAssistant, entity: str) -> str | None:
+async def get_stream_source(hass: HomeAssistant, entity_id: str) -> str | None:
+    """Get camera stream source using HA supported API."""
     try:
-        component: EntityComponent = hass.data["camera"]
-        camera: Camera = next(e for e in component.entities if e.entity_id == entity)
-        return await camera.stream_source()
+        return await camera_component.async_get_stream_source(hass, entity_id)
     except Exception as e:
         _LOGGER.error("get_stream_source", exc_info=e)
         return None
 
+
 async def get_tts_duration(hass: HomeAssistant, tts_url: str) -> float:
     try:
         # Ensure we have the full URL
-        if tts_url.startswith('/'):
+        if tts_url.startswith("/"):
             base_url = get_url(hass)
             full_url = f"{base_url}{tts_url}"
         else:
             full_url = tts_url
 
-        # Use Home Assistant's aiohttp client session
         session = async_get_clientsession(hass)
         async with session.get(full_url) as response:
             if response.status != 200:
                 _LOGGER.error(f"Failed to fetch TTS audio: HTTP {response.status}")
                 return 0
-            
+
             content = await response.read()
 
-        # Use mutagen to get the duration
         audio = MP3(io.BytesIO(content))
         duration = audio.info.length
-        # Log the calculated duration
-        _LOGGER.info(f"TTS duration calculated successfully: {duration} seconds")        
+        _LOGGER.info(f"TTS duration calculated successfully: {duration} seconds")
         return duration
 
     except Exception as e:
         _LOGGER.error(f"Error getting TTS duration: {e}")
         return 0
+
 
 async def stream_run(hass: HomeAssistant, data: dict, stt_stream: Stream) -> None:
     stream_kwargs = data.get("stream", {})
@@ -102,7 +102,6 @@ async def stream_run(hass: HomeAssistant, data: dict, stt_stream: Stream) -> Non
             return
 
     stt_stream.open(**stream_kwargs)
-
     await hass.async_add_executor_job(stt_stream.run)
 
 
@@ -117,17 +116,13 @@ async def assist_run(
     assist = data.get("assist", {})
 
     if pipeline_id := data.get("pipeline_id"):
-        # get pipeline from pipeline ID
         pipeline = assist_pipeline.async_get_pipeline(hass, pipeline_id)
     elif pipeline_json := assist.get("pipeline"):
-        # get pipeline from JSON
         pipeline = Pipeline.from_json(pipeline_json)
     else:
-        # get default pipeline
         pipeline = assist_pipeline.async_get_pipeline(hass)
 
     if "start_stage" not in assist:
-        # auto select start stage
         if pipeline.wake_word_entity:
             assist["start_stage"] = PipelineStage.WAKE_WORD
         elif pipeline.stt_engine:
@@ -136,7 +131,6 @@ async def assist_run(
             raise Exception("Unknown start_stage")
 
     if "end_stage" not in assist:
-        # auto select end stage
         if pipeline.tts_engine:
             assist["end_stage"] = PipelineStage.TTS
         else:
@@ -145,16 +139,13 @@ async def assist_run(
     player_entity_id = data.get("player_entity_id")
     browser_id = data.get("browser_id")
 
-    # 2. Setup Pipeline Run
+    # 2. Setup Pipeline Run events
     events = {}
 
     def internal_event_callback(event: PipelineEvent):
         _LOGGER.debug(f"event: {event}")
-
         events[event.type] = (
-            {"data": event.data, "timestamp": event.timestamp}
-            if event.data
-            else {"timestamp": event.timestamp}
+            {"data": event.data, "timestamp": event.timestamp} if event.data else {"timestamp": event.timestamp}
         )
 
         if event.type == PipelineEventType.WAKE_WORD_END:
@@ -164,22 +155,25 @@ async def assist_run(
                 messages = [msg.strip() for msg in messages_str.split(",")]
                 random_message = random.choice(messages)
                 media_id = f"media-source://tts/{tts_service}?message={random_message}&language={tts_language}"
-
                 play_media(hass, player_entity_id, media_id, "music")
+
             if player_entity_id and (media_id := data.get("speech_gif")):
                 show_popup(hass, player_entity_id, media_id, "picture", browser_id)
+
             if player_entity_id and (media_id := data.get("listen_gif")):
-                asyncio.create_task(async_delay_listening(hass, player_entity_id, media_id,"picture", browser_id ))
+                asyncio.create_task(async_delay_listening(hass, player_entity_id, media_id, "picture", browser_id))
 
         elif event.type == PipelineEventType.TTS_END:
             if player_entity_id:
-                tts = event.data["tts_output"]
-                play_media(hass, player_entity_id, tts["url"], tts["mime_type"])
+                tts_out = event.data["tts_output"]
+                play_media(hass, player_entity_id, tts_out["url"], tts_out["mime_type"])
+
             if player_entity_id and (media_id := data.get("speech_gif")):
                 show_popup(hass, player_entity_id, media_id, "picture", browser_id)
+
             if player_entity_id:
-                tts = event.data["tts_output"]
-                tts_url = tts["url"]
+                tts_out = event.data["tts_output"]
+                tts_url = tts_out["url"]
                 asyncio.create_task(async_delay_close_popup(hass, player_entity_id, browser_id, tts_url, events))
 
         if event_callback:
@@ -189,10 +183,10 @@ async def assist_run(
         hass,
         context=context,
         pipeline=pipeline,
-        start_stage=assist["start_stage"],  # wake_word, stt, intent, tts
-        end_stage=assist["end_stage"],  # wake_word, stt, intent, tts
+        start_stage=assist["start_stage"],
+        end_stage=assist["end_stage"],
         event_callback=internal_event_callback,
-        tts_audio_output=assist.get("tts_audio_output"),  # None, wav, mp3
+        tts_audio_output=assist.get("tts_audio_output"),
         wake_word_settings=new(WakeWordSettings, assist.get("wake_word_settings")),
         audio_settings=new(AudioSettings, assist.get("audio_settings")),
     )
@@ -201,7 +195,7 @@ async def assist_run(
     pipeline_input = PipelineInput(
         run=pipeline_run,
         stt_metadata=stt.SpeechMetadata(
-            language="",  # set in async_pipeline_from_audio_stream
+            language="",
             format=stt.AudioFormats.WAV,
             codec=stt.AudioCodecs.PCM,
             bit_rate=stt.AudioBitRates.BITRATE_16,
@@ -216,18 +210,15 @@ async def assist_run(
     )
 
     try:
-        # 4. Validate Pipeline
         await pipeline_input.validate()
 
-        # 5. Run Stream (optional)
         if stt_stream:
             stt_stream.start()
 
-        # 6. Run Pipeline
         await pipeline_input.execute()
 
     except AttributeError:
-        pass  # 'PipelineRun' object has no attribute 'stt_provider'
+        pass
     finally:
         if stt_stream:
             stt_stream.stop()
@@ -236,26 +227,20 @@ async def assist_run(
 
 
 async def async_delay_listening(hass, player_entity_id, media_id, media_type, browser_id):
-    # Așteaptă o secundă înainte de a începe verificarea
     await asyncio.sleep(1.5)
-
-#    while True:
-#        player_state = hass.states.get(player_entity_id).state
-#        if player_state == "idle":
-#            break  # Ieși din buclă dacă playerul nu mai este în starea "playing"
-#        await asyncio.sleep(0.1)  # Așteaptă 100 ms și verifică din nou
-
     show_popup(hass, player_entity_id, media_id, media_type, browser_id)
 
 
 async def async_delay_close_popup(hass, player_entity_id, browser_id, tts_url, events):
-
     duration = await get_tts_duration(hass, tts_url)
-    events[PipelineEventType.TTS_END]["data"]["tts_duration"] = duration
+    try:
+        events[PipelineEventType.TTS_END]["data"]["tts_duration"] = duration
+    except Exception:
+        pass
     _LOGGER.debug(f"Stored TTS duration: {duration} seconds")
-    # Set a timer to simulate wake word detection after TTS playback
     await asyncio.sleep(duration)
     close_popup(hass, player_entity_id, browser_id)
+
 
 def play_media(hass: HomeAssistant, entity_id: str, media_id: str, media_type: str):
     service_data = {
@@ -263,39 +248,26 @@ def play_media(hass: HomeAssistant, entity_id: str, media_id: str, media_type: s
         "media_content_id": media_player.async_process_play_media_url(hass, media_id),
         "media_content_type": media_type,
     }
-
-    # hass.services.call will block Hass
     coro = hass.services.async_call("media_player", "play_media", service_data)
     hass.async_create_background_task(coro, "visual_stream_assist_play_media")
 
 
 def show_popup(hass: HomeAssistant, player_entity_id: str, media_id: str, media_type: str, browser_id: str):
-    service_data = {        
+    service_data = {
         "entity_id": player_entity_id,
         "browser_id": browser_id,
-        "style": """
-            --popup-min-width: 800px;
-            --popup-border-radius: 28px;
-        """,
-        "content": 
-        {
-            "type": media_type,
-            "image": media_id
-        }
-        
+        "style": """ --popup-min-width: 800px; --popup-border-radius: 28px; """,
+        "content": {"type": media_type, "image": media_id},
     }
-
     coro = hass.services.async_call("browser_mod", "popup", service_data)
     hass.async_create_background_task(coro, "visual_stream_assist_show_popup")
 
-def close_popup(hass: HomeAssistant, player_entity_id: str, browser_id: str):
-    service_data = {        
-        "entity_id": player_entity_id,
-        "browser_id": browser_id,
-    }
 
+def close_popup(hass: HomeAssistant, player_entity_id: str, browser_id: str):
+    service_data = {"entity_id": player_entity_id, "browser_id": browser_id}
     coro = hass.services.async_call("browser_mod", "close_popup", service_data)
     hass.async_create_background_task(coro, "visual_stream_assist_close_popup")
+
 
 def run_forever(
     hass: HomeAssistant,
@@ -311,7 +283,7 @@ def run_forever(
                 await stream_run(hass, data, stt_stream=stt_stream)
             except Exception as e:
                 _LOGGER.debug(f"run_stream error {type(e)}: {e}")
-            await asyncio.sleep(30)
+                await asyncio.sleep(30)
 
     async def run_assist():
         while not stt_stream.closed:
