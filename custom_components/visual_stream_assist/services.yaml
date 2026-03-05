@@ -1,19 +1,21 @@
-# https://developers.home-assistant.io/docs/dev_101_services
+# https://developers.home-assistant.io/docs/dev_101_services/
 # https://www.home-assistant.io/docs/blueprint/selectors/
+
 run:
   name: Run
-  description:
+  description: Run Visual Stream Assist pipeline
+
   fields:
     stream_source:
       name: Stream URL
-      description: Link to stream (any type, supported by FFmpeg)
-      example: rtsp://rtsp:12345678@192.168.1.123:554/av_stream/ch0
+      description: Link to stream (any type supported by FFmpeg)
+      example: rtsp://user:pass@192.168.1.123:554/av_stream/ch0
       selector:
         text:
 
     camera_entity_id:
       name: Camera Entity
-      description: Entity for STT source
+      description: Camera entity to use as audio (STT) source
       selector:
         entity:
           domain: camera
@@ -22,7 +24,7 @@ run:
 
     player_entity_id:
       name: Player Entity
-      description: Entity for playing TTS
+      description: Media player entity for playing TTS and showing popups
       selector:
         entity:
           domain: media_player
@@ -31,54 +33,55 @@ run:
 
     browser_id:
       name: Browser ID
-      description: Browser for playing gif picture
+      description: Browser Mod browser_id for showing GIF popup
       selector:
         text:
 
     tts_service:
-      name: TTS_service
-      description: Tss service for playing wake word detection resposnses
+      name: TTS service
+      description: TTS provider name (e.g., edge_tts) used for wake-word responses
       selector:
         text:
 
     tts_language:
-      name: TTS_language
-      description: Tss language for playing wake word detection resposnses
+      name: TTS language
+      description: TTS voice/language used for wake-word responses (must match pipeline)
       selector:
         text:
 
     stt_start_media:
-      name: Wake Word detect media
-      description: media-source://tts/edge_tts?message=how can i assist you&language=en-US-MichelleNeural
+      name: Wake word detect media
+      description: Comma-separated wake word responses (used to build a media-source TTS URL)
+      example: "how can I help you, yes, I'm listening"
       selector:
         text:
 
     speech_gif:
       name: GIF for speak
-      description: Link to the gif for simulate speaking
+      description: Link/path to GIF to display while speaking (e.g. /local/gifs/jarvis_speech.gif)
       selector:
         text:
 
     listen_gif:
       name: GIF for listen
-      description: Link to the gif for simulate listening
+      description: Link/path to GIF to display while listening (e.g. /local/gifs/jarvis_listen.gif)
       selector:
         text:
 
     pipeline_id:
       name: Pipeline
-      description: Settings > Voice Assistant
+      description: Settings > Voice assistants > Pipelines
       selector:
         assist_pipeline:
 
     assist:
       name: Assist
-      description: Advanced parameters
+      description: Advanced pipeline parameters (optional)
       selector:
         object:
 
     stream:
       name: Stream
-      description: Advanced parameters
+      description: Advanced stream parameters (optional)
       selector:
         object:
