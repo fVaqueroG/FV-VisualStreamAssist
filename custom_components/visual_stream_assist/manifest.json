@@ -8,5 +8,5 @@
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/relust/VisualStreamAssist/issues",
   "requirements": ["mutagen==1.47.0"],
-  "version": "2.0.1"
+  "version": "2.0.2"
 }
