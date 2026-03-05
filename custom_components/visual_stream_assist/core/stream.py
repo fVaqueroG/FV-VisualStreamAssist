@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 import av
 from av.audio.resampler import AudioResampler
@@ -10,16 +11,21 @@ _LOGGER = logging.getLogger(__name__)
 
 class Stream:
     """
-    Audio stream reader (PyAV) that yields 16kHz mono s16le PCM chunks.
+    Continuous audio stream reader (PyAV) that yields 16kHz mono s16 PCM chunks.
 
-    IMPORTANT CHANGE vs upstream:
-    - Queue is bounded to prevent unbounded RAM growth (which can trigger HA restarts).
-    - When queue is full, we drop the oldest audio chunk(s) to keep "latest audio" behavior.
+    Goals:
+    - Mic stays ON for wakeword (continuous decode + enqueue)
+    - Prevent HA restarts by controlling:
+        * memory growth (bounded queue)
+        * CPU runaway (backoff + reduced ffmpeg probing + single thread)
+        * backlog behavior (drop old audio when consumer lags)
     """
 
-    # Tune these if needed
-    MAX_QUEUE_CHUNKS = 120  # ~a few seconds depending on chunking; prevents OOM
-    DROP_CHUNKS_ON_FULL = 20  # drop in batches to recover quickly
+    # --- TUNABLE SAFETY LIMITS ---
+    MAX_QUEUE_CHUNKS = 200          # bounded queue (prevents OOM)
+    DROP_CHUNKS_ON_FULL = 40        # drop old audio when behind
+    OVERLOAD_SLEEP_S = 0.02         # brief backoff when overloaded (CPU saver)
+    # -----------------------------
 
     def __init__(self):
         self.closed: bool = False
@@ -30,27 +36,32 @@ class Stream:
     def open(self, file: str, **kwargs):
         _LOGGER.debug("stream open")
 
-        if "options" not in kwargs:
-            kwargs["options"] = {
-                "fflags": "nobuffer",
-                "flags": "low_delay",
-                "timeout": "5000000",
-            }
+        # Default options tuned for low-latency + low CPU
+        opts = kwargs.get("options") or {}
+        opts.setdefault("fflags", "nobuffer")
+        opts.setdefault("flags", "low_delay")
+
+        # BIG CPU saver on some streams:
+        # reduce probing (less analysis, less cpu) + single thread
+        opts.setdefault("analyzeduration", "0")
+        opts.setdefault("probesize", "32")
+        opts.setdefault("threads", "1")
+
+        # keep audio-only
+        opts.setdefault("allowed_media_types", "audio")
 
         if file.startswith("rtsp"):
-            kwargs["options"]["rtsp_flags"] = "prefer_tcp"
+            # prefer tcp avoids packet loss churn
+            opts.setdefault("rtsp_flags", "prefer_tcp")
+            # Some builds also accept:
+            opts.setdefault("stimeout", "5000000")  # microseconds
 
-        # audio-only is good (lower CPU/bandwidth), keep it:
-        kwargs["options"]["allowed_media_types"] = "audio"
-
-        # av.open also accepts a "timeout" kwarg; keep existing default:
+        kwargs["options"] = opts
         kwargs.setdefault("timeout", 5)
 
-        # https://pyav.org/docs/9.0.2/api/_globals.html
         self.container = av.open(file, **kwargs)
 
     def _drop_old_audio(self):
-        """Drop some queued chunks to make room (best-effort, non-blocking)."""
         dropped = 0
         while dropped < self.DROP_CHUNKS_ON_FULL:
             try:
@@ -58,37 +69,47 @@ class Stream:
                 dropped += 1
             except asyncio.QueueEmpty:
                 break
+        return dropped
 
     def run(self, end=True):
+        """
+        Blocking method (runs in executor thread).
+        Continuously decodes while enabled=True.
+        """
         _LOGGER.debug("stream start")
 
         resampler = AudioResampler(format="s16", layout="mono", rate=16000)
 
         try:
-            # decode audio frames from stream
+            if not self.container:
+                return
+
             for frame in self.container.decode(audio=0):
                 if self.closed:
                     return
 
-                # If not actively listening, skip processing to reduce load
+                # If "mic" disabled, do not enqueue; still decode may be expensive
+                # but in your case you want enabled always for wakeword.
                 if not self.enabled:
+                    time.sleep(0.05)
                     continue
 
                 for frame_raw in resampler.resample(frame):
                     chunk = frame_raw.to_ndarray().tobytes()
 
-                    # Prevent unbounded RAM growth:
+                    # If consumer is lagging, drop old audio and briefly back off
                     if self.queue.full():
                         self._drop_old_audio()
+                        time.sleep(self.OVERLOAD_SLEEP_S)
 
                     try:
                         self.queue.put_nowait(chunk)
                     except asyncio.QueueFull:
-                        # If still full (extreme stall), drop this chunk
-                        pass
+                        # Extreme stall: drop this chunk and back off
+                        time.sleep(self.OVERLOAD_SLEEP_S)
 
         except Exception as e:
-            _LOGGER.debug(f"stream exception {type(e)}: {e}")
+            _LOGGER.debug("stream exception %s: %s", type(e), e)
 
         finally:
             try:
@@ -99,9 +120,8 @@ class Stream:
 
             self.container = None
 
-            # Signal end-of-stream to consumer if we were enabled
             if end and self.enabled:
-                # Make sure we can always push the terminator:
+                # Ensure terminator can be pushed
                 if self.queue.full():
                     self._drop_old_audio()
                 try:
@@ -116,7 +136,7 @@ class Stream:
         self.closed = True
 
     def start(self):
-        # Clear any stale audio
+        # Clear stale audio to start “fresh”
         while True:
             try:
                 self.queue.get_nowait()
